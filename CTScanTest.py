@@ -1,0 +1,25 @@
+import SimpleITK as sitk
+import matplotlib.pyplot as plt
+import numpy as np
+image_viewer = sitk.ImageViewer()
+image_viewer.SetApplication("C:\\Users\\kevta\\Fiji\\fiji-windows-x64.exe")
+dicom_directory = "C:/Users/kevta/Biomedical Scans/manifest-1608266677008/MIDRC-RICORD-1A/MIDRC-RICORD-1A-419639-000082/08-02-2002-NA-CT CHEST WITHOUT CONTRAST-04614/3.000000-0.625mm bone alg-26970/"
+series_IDs = sitk.ImageSeriesReader.GetGDCMSeriesIDs(dicom_directory)
+print(series_IDs)
+reader = sitk.ImageSeriesReader()
+reader.SetFileNames(sitk.ImageSeriesReader.GetGDCMSeriesFileNames(dicom_directory, series_IDs[0]))
+image = reader.Execute()
+image_array = sitk.GetArrayFromImage(image)
+flat_image_array = image_array.flatten()
+hist, bins = np.histogram(flat_image_array, bins=256, range=[-2000, 3000])
+plt.figure(figsize=(10, 6))
+plt.plot(bins[:-1], hist)
+plt.title("CT Scan Historgram")
+plt.xlabel("Pixel Value")
+plt.ylabel("Frequency")
+plt.grid(True)
+plt.show()
+image_viewer.Execute(image)
+print(f"Image size: {image.GetSize()}")
+print(f"Image spacing: {image.GetSpacing()}")
+print(f"First pixel: {image.GetPixel([0,0,0])}")
