@@ -1,0 +1,182 @@
+import SimpleITK as sitk
+import matplotlib.pyplot as plt
+import numpy as np
+import json
+import os
+
+print(sitk.Version())
+
+# Setup image viewer (optional, for final viewing)
+image_viewer = sitk.ImageViewer()
+image_viewer.SetApplication("C:\\Users\\jagal\\Fiji\\fiji-windows-x64.exe")
+
+# Load DICOM series
+dicom_directory = "C:/Users/jagal/Biomedical Scans/manifest-1761774668503/MIDRC-RICORD-1A/MIDRC-RICORD-1A-419639-000082/08-02-2002-NA-CT CHEST WITHOUT CONTRAST-04614/3.000000-0.625mm bone alg-26970"
+series_IDs = sitk.ImageSeriesReader.GetGDCMSeriesIDs(dicom_directory)
+print(f"Series IDs: {series_IDs}")
+
+reader = sitk.ImageSeriesReader()
+reader.SetFileNames(sitk.ImageSeriesReader.GetGDCMSeriesFileNames(dicom_directory, series_IDs[0]))
+image = reader.Execute()
+
+# Cast to float for processing
+image = sitk.Cast(image, sitk.sitkFloat64)
+
+# B1 Algorithm: Anisotropic Diffusion Filter
+print("Applying anisotropic diffusion filter...")
+anisotropic_filter = sitk.CurvatureAnisotropicDiffusionImageFilter()
+anisotropic_filter.SetNumberOfIterations(5)
+anisotropic_filter.SetConductanceParameter(3.0)
+filtered_image = anisotropic_filter.Execute(image)
+
+# Step 1: Segment Lung Fields
+print("Segmenting lung fields...")
+lung_lower_threshold = -1000
+lung_upper_threshold = -400
+
+lung_mask = sitk.BinaryThreshold(
+    filtered_image,
+    lowerThreshold=lung_lower_threshold,
+    upperThreshold=lung_upper_threshold,
+    insideValue=1,
+    outsideValue=0
+)
+
+# Clean up lung mask with morphology
+lung_opening = sitk.BinaryMorphologicalOpeningImageFilter()
+lung_opening.SetKernelRadius(3)
+lung_opening.SetKernelType(sitk.sitkBall)
+lung_opening.SetForegroundValue(1)
+lung_mask_clean = lung_opening.Execute(lung_mask)
+
+# Step 2: Segment COVID regions (ground-glass opacity)
+print("Segmenting COVID regions...")
+covid_lower_threshold = -700
+covid_upper_threshold = -300
+
+covid_segmented = sitk.BinaryThreshold(
+    filtered_image, 
+    lowerThreshold=covid_lower_threshold, 
+    upperThreshold=covid_upper_threshold,
+    insideValue=1,
+    outsideValue=0
+)
+
+# Morphological Operations on COVID segmentation
+kernel_radius = 2
+
+# Opening: removes small noise
+print("Applying morphological opening...")
+opening_filter = sitk.BinaryMorphologicalOpeningImageFilter()
+opening_filter.SetKernelRadius(kernel_radius)
+opening_filter.SetKernelType(sitk.sitkBall)
+opening_filter.SetForegroundValue(1)
+covid_opened = opening_filter.Execute(covid_segmented)
+
+# Closing: fills small holes
+print("Applying morphological closing...")
+closing_filter = sitk.BinaryMorphologicalClosingImageFilter()
+closing_filter.SetKernelRadius(kernel_radius)
+closing_filter.SetKernelType(sitk.sitkBall)
+closing_filter.SetForegroundValue(1)
+covid_closed = closing_filter.Execute(covid_opened)
+
+# Step 3: Intersect COVID with lung fields (only keep COVID in lungs)
+print("Intersecting COVID regions with lung fields...")
+covid_in_lungs = sitk.And(covid_closed, lung_mask_clean)
+
+# Step 4: Connected Component Analysis
+print("Performing connected component analysis...")
+connected_components = sitk.ConnectedComponent(covid_in_lungs)
+labeled_image = sitk.RelabelComponent(connected_components, minimumObjectSize=100)
+
+# Step 5: Quantitative Characterization
+print("\n=== QUANTITATIVE ANALYSIS ===")
+
+# Label statistics for shape analysis
+label_shape_stats = sitk.LabelShapeStatisticsImageFilter()
+label_shape_stats.Execute(labeled_image)
+
+# Intensity statistics
+label_intensity_stats = sitk.LabelIntensityStatisticsImageFilter()
+label_intensity_stats.Execute(labeled_image, filtered_image)
+
+num_regions = label_shape_stats.GetNumberOfLabels()
+print(f"\nNumber of detected COVID regions: {num_regions}")
+
+# Get image spacing for physical measurements
+spacing = image.GetSpacing()
+print(f"Image spacing: {spacing} mm")
+
+# Analyze each region
+""""
+
+"""
+
+# Overall statistics
+image_array = sitk.GetArrayFromImage(image)
+filtered_array = sitk.GetArrayFromImage(filtered_image)
+lung_array = sitk.GetArrayFromImage(lung_mask_clean)
+covid_array = sitk.GetArrayFromImage(covid_segmented)
+covid_opened_array = sitk.GetArrayFromImage(covid_opened)
+covid_closed_array = sitk.GetArrayFromImage(covid_closed)
+covid_in_lungs_array = sitk.GetArrayFromImage(covid_in_lungs)
+labeled_array = sitk.GetArrayFromImage(labeled_image)
+
+total_lung_volume = np.sum(lung_array) * np.prod(spacing) / 1000.0  # mL
+total_covid_volume = np.sum(covid_in_lungs_array) * np.prod(spacing) / 1000.0  # mL
+covid_percentage = (total_covid_volume / total_lung_volume * 100) if total_lung_volume > 0 else 0
+
+# Print statistics
+"""
+
+"""
+
+# Visualization
+middle_slice = image.GetSize()[2] // 2
+
+fig, axes = plt.subplots(3, 3, figsize=(18, 15))
+
+axes[0, 0].imshow(image_array[middle_slice, :, :], cmap='gray')
+axes[0, 0].set_title('Original CT Scan')
+axes[0, 0].axis('off')
+
+axes[0, 1].imshow(filtered_array[middle_slice, :, :], cmap='gray')
+axes[0, 1].set_title('After Anisotropic Filter')
+axes[0, 1].axis('off')
+
+axes[0, 2].imshow(lung_array[middle_slice, :, :], cmap='gray')
+axes[0, 2].set_title(f'Lung Segmentation\n({lung_lower_threshold} to {lung_upper_threshold} HU)')
+axes[0, 2].axis('off')
+
+axes[1, 0].imshow(covid_array[middle_slice, :, :], cmap='gray')
+axes[1, 0].set_title(f'COVID Threshold\n({covid_lower_threshold} to {covid_upper_threshold} HU)')
+axes[1, 0].axis('off')
+
+axes[1, 1].imshow(covid_opened_array[middle_slice, :, :], cmap='gray')
+axes[1, 1].set_title('After Opening')
+axes[1, 1].axis('off')
+
+axes[1, 2].imshow(covid_closed_array[middle_slice, :, :], cmap='gray')
+axes[1, 2].set_title('After Closing')
+axes[1, 2].axis('off')
+
+axes[2, 0].imshow(covid_in_lungs_array[middle_slice, :, :], cmap='gray')
+axes[2, 0].set_title('COVID in Lungs Only')
+axes[2, 0].axis('off')
+
+axes[2, 1].imshow(labeled_array[middle_slice, :, :], cmap='nipy_spectral')
+axes[2, 1].set_title(f'Connected Components\n({num_regions} regions)')
+axes[2, 1].axis('off')
+
+# Final overlay
+axes[2, 2].imshow(image_array[middle_slice, :, :], cmap='gray')
+axes[2, 2].imshow(covid_in_lungs_array[middle_slice, :, :], cmap='Reds', alpha=0.4)
+axes[2, 2].set_title(f'Final Segmentation Overlay')
+axes[2, 2].axis('off')
+
+plt.tight_layout()
+plt.show()
+
+
+image_viewer.Execute(labeled_image)
