@@ -125,7 +125,8 @@ covid_percentage = (total_covid_volume / total_lung_volume * 100) if total_lung_
 
 # Print statistics
 print(f"\n OVERALL STATISTICS ")
-print(f"Total lung volume: {total_lung_volume:.2f}")
+print(f"Total lung volume: {total_lung_volume:.2f} mL")
+print(f"Total COVID volume: {total_covid_volume:.2f} mL")
 print(f"Percentage of lung affected: {covid_percentage:.2f}%")
 
 #using the metrics from the following study
@@ -143,7 +144,58 @@ elif covid_percentage < 75:
 else: 
     severity =" Critical "
 
-print(f"Estimated severity: {severity}")
+print(f"\nEstimated severity: {severity}")
+
+# REGIONAL ANALYSIS - Divide into 4 quadrants
+
+print(f"\nQUADRANT ANALYSIS ")
+
+
+# Get dimensions
+z_size, y_size, x_size = covid_in_lungs_array.shape
+z_mid = z_size // 2  # Superior/Inferior division
+x_mid = x_size // 2  # Left/Right division
+
+# Define quadrants
+quadrants = {
+    'Upper Right': (slice(0, z_mid), slice(None), slice(x_mid, x_size)),
+    'Upper Left': (slice(0, z_mid), slice(None), slice(0, x_mid)),
+    'Lower Right': (slice(z_mid, z_size), slice(None), slice(x_mid, x_size)),
+    'Lower Left': (slice(z_mid, z_size), slice(None), slice(0, x_mid))
+}
+
+quadrant_stats = {}
+
+for quad_name, (z_slice, y_slice, x_slice) in quadrants.items():
+    # Extract quadrant data
+    lung_quadrant = lung_array[z_slice, y_slice, x_slice]
+    covid_quadrant = covid_in_lungs_array[z_slice, y_slice, x_slice]
+    
+    # Calculate volumes
+    quad_lung_volume = np.sum(lung_quadrant) * np.prod(spacing) / 1000.0  # mL
+    quad_covid_volume = np.sum(covid_quadrant) * np.prod(spacing) / 1000.0  # mL
+    quad_percentage = (quad_covid_volume / quad_lung_volume * 100) 
+    
+    # Store stats
+    quadrant_stats[quad_name] = {
+        'lung_volume': quad_lung_volume,
+        'covid_volume': quad_covid_volume,
+        'percentage': quad_percentage
+    }
+    
+    # Print quadrant statistics
+    print(f"\n{quad_name} Quadrant:")
+    print(f"  Lung volume: {quad_lung_volume:.2f} mL")
+    print(f"  COVID volume: {quad_covid_volume:.2f} mL")
+    print(f"  Affected: {quad_percentage:.2f}%")
+
+# Print summary comparison
+print(f"\nQUADRANT COMPARISON SUMMARY:")
+sorted_quads = sorted(quadrant_stats.items(), key=lambda x: x[1]['percentage'], reverse=True)
+print("\nMost to Least Affected:")
+for i, (quad_name, stats) in enumerate(sorted_quads, 1):
+    print(f"{i}. {quad_name}: {stats['percentage']:.2f}% affected")
+
 
 # Visualization
 middle_slice = image.GetSize()[2] // 2
@@ -214,7 +266,21 @@ axes[2, 2].imshow(labeled_masked, cmap='nipy_spectral', alpha=0.5)
 axes[2, 2].set_title(f'Labeled Regions on CT\n({num_regions} regions)')
 axes[2, 2].axis('off')
 
-axes[2, 3].axis('off') 
+# Quadrant overlay visualization
+axes[2, 3].imshow(image_array[middle_slice, :, :], cmap='gray')
+axes[2, 3].imshow(covid_in_lungs_array[middle_slice, :, :], cmap='Reds', alpha=0.4)
+
+# Draw quadrant dividing lines
+y_max, x_max = image_array[middle_slice, :, :].shape
+
+# Vertical line (divides left/right)
+axes[2, 3].axvline(x=x_max // 2, color='cyan', linewidth=2, linestyle='--')
+
+# Horizontal line (divides anterior/posterior on this axial slice)
+axes[2, 3].axhline(y=y_max // 2, color='cyan', linewidth=2, linestyle='--')
+
+axes[2, 3].set_title('Quadrant Division Overlay\nwith COVID Segmentation')
+axes[2, 3].axis('off')
 plt.tight_layout()
 plt.show()
 
