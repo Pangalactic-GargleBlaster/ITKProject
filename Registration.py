@@ -6,7 +6,7 @@ smoothing_filter.SetSigma(5)
 region_growing_filter = sitk.ConnectedThresholdImageFilter()
 region_growing_filter.SetSeedList([(128, 256, 256),(384, 256, 256)])
 region_growing_filter.SetLower(-1000)
-region_growing_filter.SetUpper(-200)
+region_growing_filter.SetUpper(-150)
 erosion_filter = sitk.BinaryErodeImageFilter()
 erosion_filter.SetKernelRadius(1)
 mask_filter = sitk.MaskImageFilter()
@@ -14,7 +14,7 @@ def lungsBorder(image: sitk.Image):
     smoothed_image = smoothing_filter.Execute(image)
     binary_image = region_growing_filter.Execute(smoothed_image)
     eroded_image = erosion_filter.Execute(binary_image)
-    return sitk.SignedMaurerDistanceMap(binary_image-eroded_image)
+    return sitk.Cast(binary_image-eroded_image, sitk.sitkFloat64)
 
 
 image_viewer = sitk.ImageViewer()
@@ -26,14 +26,19 @@ reference_series_IDs = sitk.ImageSeriesReader.GetGDCMSeriesIDs(reference_dicom_d
 reader.SetFileNames(sitk.ImageSeriesReader.GetGDCMSeriesFileNames(reference_dicom_directory, reference_series_IDs[0]))
 reference_image = reader.Execute()
 reference_image = sitk.Cast(reference_image, sitk.sitkFloat64)
-reference_lungs = lungsBorder(reference_image)
+reference_lungs_border = lungsBorder(reference_image)
 print("reference lung field ready")
-image_viewer.Execute(reference_image)
+image_viewer.Execute(reference_lungs_border)
 
 metadata_path = "C:/Users/admin/Desktop/821/CovidScans/manifest-1608266677008/metadata.csv"
 registration = sitk.ImageRegistrationMethod()
-registration.SetMetricAsJointHistogramMutualInformation()
-registration.SetOptimizerAsAmoeba(0.1, 100)
+registration.SetMetricAsMeanSquares()
+registration.SetOptimizerAsGradientDescent(
+    learningRate=0.1,
+    numberOfIterations=200,
+    convergenceMinimumValue=1e-4,
+    convergenceWindowSize=5)
+
 registration.SetInterpolator(sitk.sitkLinear)
 registration.AddCommand(sitk.sitkIterationEvent,
                lambda: print(registration.GetOptimizerIteration(),
@@ -50,10 +55,11 @@ with open(metadata_path, "r") as metadata_file:
 			reader.SetFileNames(sitk.ImageSeriesReader.GetGDCMSeriesFileNames(dicom_directory, series_IDs[0]))
 			image = reader.Execute()
 			image = sitk.Cast(image, sitk.sitkFloat64)
-			lungs_only_image = lungsBorder(image)
+			lungs_border = lungsBorder(image)
 			print("lung field to be registered ready")
+			image_viewer.Execute(lungs_border)
 			registration.SetInitialTransform(sitk.Similarity3DTransform())
-			transform = registration.Execute(reference_lungs, lungs_only_image)
+			transform = registration.Execute(reference_lungs_border, lungs_border)
 			print(f"the transform for this image is {transform}")
 			resampler = sitk.ResampleImageFilter()
 			resampler.SetReferenceImage(reference_image)
