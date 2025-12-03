@@ -1,0 +1,8 @@
+[project]
+name = "sitk"
+version = "1.0.0"
+channels = ["conda-forge"]
+platforms = ["win-64"]
+
+[dependencies]
+SimpleITK = "*"
