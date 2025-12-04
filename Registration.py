@@ -6,7 +6,7 @@ smoothing_filter.SetSigma(5)
 region_growing_filter = sitk.ConnectedThresholdImageFilter()
 region_growing_filter.SetSeedList([(128, 256, 256),(384, 256, 256)])
 region_growing_filter.SetLower(-1000)
-region_growing_filter.SetUpper(-150)
+region_growing_filter.SetUpper(-200)
 erosion_filter = sitk.BinaryErodeImageFilter()
 erosion_filter.SetKernelRadius(1)
 mask_filter = sitk.MaskImageFilter()
@@ -14,8 +14,13 @@ def lungsBorder(image: sitk.Image):
     smoothed_image = smoothing_filter.Execute(image)
     binary_image = region_growing_filter.Execute(smoothed_image)
     eroded_image = erosion_filter.Execute(binary_image)
-    return sitk.Cast(binary_image-eroded_image, sitk.sitkFloat64)
-
+    # return sitk.SignedMaurerDistanceMap(
+	# 	binary_image-eroded_image,
+	# 	insideIsPositive=True,
+	# 	squaredDistance=False
+	# )
+    # return sitk.Cast(binary_image-eroded_image, sitk.sitkFloat64)
+    return sitk.Cast(eroded_image, sitk.sitkFloat64)
 
 image_viewer = sitk.ImageViewer()
 image_viewer.SetApplication('C:\\Users\\admin\\AppData\\Local\\Fiji\\fiji-windows-x64.exe')
@@ -32,9 +37,11 @@ image_viewer.Execute(reference_lungs_border)
 
 metadata_path = "C:/Users/admin/Desktop/821/CovidScans/manifest-1608266677008/metadata.csv"
 registration = sitk.ImageRegistrationMethod()
-registration.SetMetricAsMeanSquares()
+registration.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
+registration.SetMetricSamplingStrategy(registration.RANDOM)
+registration.SetMetricSamplingPercentage(0.02)
 registration.SetOptimizerAsGradientDescent(
-    learningRate=0.1,
+    learningRate=0.01,
     numberOfIterations=200,
     convergenceMinimumValue=1e-4,
     convergenceWindowSize=5)
