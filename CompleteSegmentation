@@ -8,7 +8,7 @@ from datetime import datetime
 
 print(f"SimpleITK Version: {sitk.Version()}")
 
-# Base directory for DICOM data
+
 BASE_DICOM_DIR = "C:/Users/jagal/Biomedical Scans/manifest-1608266677008/MIDRC-RICORD-1A"
 
 # Patient directories to process
