@@ -1,0 +1,442 @@
+import SimpleITK as sitk
+import matplotlib.pyplot as plt
+import numpy as np
+import json
+import os
+from pathlib import Path
+from datetime import datetime
+
+print(f"SimpleITK Version: {sitk.Version()}")
+
+# Base directory for DICOM data
+BASE_DICOM_DIR = "C:/Users/jagal/Biomedical Scans/manifest-1608266677008/MIDRC-RICORD-1A"
+
+# Patient directories to process
+PATIENTS = {
+    "Patient-0": "MIDRC-RICORD-1A-419639-000082/08-02-2002-NA-CT CHEST WITHOUT CONTRAST-04614/3.000000-0.625mm bone alg-26970", #Base Case
+    "Patient-1": "MIDRC-RICORD-1A-419639-000361/10-21-2002-NA-CT CHEST WITHOUT CONTRAST-91670/3.000000-0.625mm bone alg-30767", #Maybe Case
+    "Patient-2": "MIDRC-RICORD-1A-419639-000800/05-11-2005-NA-CT CHEST WITHOUT CONTRAST-61055/3.000000-0.625mm bone alg-10315", #No Case
+    "Patient-3": "MIDRC-RICORD-1A-419639-000906/10-23-2002-NA-CT CHEST WITHOUT CONTRAST-40186/3.000000-0.625mm bone alg-94216", #Maybe Case
+    "Patient-4": "MIDRC-RICORD-1A-419639-001012/12-12-2004-NA-CT CHEST WITHOUT CONTRAST-89755/3.000000-0.625mm bone alg-69599", #Maybe Case
+    "Patient-5": "MIDRC-RICORD-1A-419639-001085/09-13-2002-NA-CT CHEST WITHOUT CONTRAST-85381/3.000000-0.625mm bone alg-67629", #Good Case
+    "Patient-6": "MIDRC-RICORD-1A-419639-001446/09-16-2006-NA-CT CHEST WITHOUT CONTRAST-60317/3.000000-0.625mm bone alg-20968", #Good Case
+}
+
+# Output directory for results
+OUTPUT_DIR = "C:/Users/jagal/Biomedical Scans/segmentation_results"
+
+# Processing parameters
+PARAMS = {
+    "anisotropic_diffusion": {
+        "num_iterations": 5,
+        "conductance": 3.0,
+        "time_step": 0.03
+    },
+    "lung_segmentation": {
+        "lower_threshold": -1000,
+        "upper_threshold": -400
+    },
+    "covid_segmentation": {
+        "lower_threshold": -700,
+        "upper_threshold": -300
+    },
+    "morphology": {
+        "kernel_radius": 2,
+        "lung_opening_radius": 3,
+        "min_component_size": 100
+    }
+}
+
+def load_dicom_series(dicom_directory):
+    """Load DICOM series from directory"""
+    print(f"\nLoading DICOM from: {dicom_directory}")
+    series_IDs = sitk.ImageSeriesReader.GetGDCMSeriesIDs(dicom_directory)
+    print(f"Found {len(series_IDs)} series")
+    
+    if len(series_IDs) == 0:
+        raise ValueError(f"No DICOM series found in {dicom_directory}")
+    
+    reader = sitk.ImageSeriesReader()
+    reader.SetFileNames(sitk.ImageSeriesReader.GetGDCMSeriesFileNames(dicom_directory, series_IDs[0]))
+    image = reader.Execute()
+    
+    # Cast to float for processing
+    image = sitk.Cast(image, sitk.sitkFloat64)
+    
+    print(f"Image size: {image.GetSize()}")
+    print(f"Image spacing: {image.GetSpacing()} mm")
+    
+    return image
+
+def apply_anisotropic_diffusion(image, params):
+    """Apply anisotropic diffusion filter"""
+    print("Applying anisotropic diffusion filter...")
+    anisotropic_filter = sitk.CurvatureAnisotropicDiffusionImageFilter()
+    anisotropic_filter.SetNumberOfIterations(params["num_iterations"])
+    anisotropic_filter.SetConductanceParameter(params["conductance"])
+    anisotropic_filter.SetTimeStep(params["time_step"])
+    return anisotropic_filter.Execute(image)
+
+def segment_lungs(filtered_image, params):
+    """Segment lung fields"""
+    print("Segmenting lung fields...")
+    lung_mask = sitk.BinaryThreshold(
+        filtered_image,
+        lowerThreshold=params["lower_threshold"],
+        upperThreshold=params["upper_threshold"],
+        insideValue=1,
+        outsideValue=0
+    )
+    
+    # Clean up with morphology
+    lung_opening = sitk.BinaryMorphologicalOpeningImageFilter()
+    lung_opening.SetKernelRadius(PARAMS["morphology"]["lung_opening_radius"])
+    lung_opening.SetKernelType(sitk.sitkBall)
+    lung_opening.SetForegroundValue(1)
+    lung_mask_clean = lung_opening.Execute(lung_mask)
+    
+    return lung_mask_clean
+
+def segment_covid(filtered_image, params):
+    """Segment COVID regions (ground-glass opacity)"""
+    print("Segmenting COVID regions...")
+    covid_segmented = sitk.BinaryThreshold(
+        filtered_image, 
+        lowerThreshold=params["lower_threshold"], 
+        upperThreshold=params["upper_threshold"],
+        insideValue=1,
+        outsideValue=0
+    )
+    
+    # Morphological operations
+    kernel_radius = PARAMS["morphology"]["kernel_radius"]
+    
+    # Opening: removes small noise
+    print("  Applying morphological opening...")
+    opening_filter = sitk.BinaryMorphologicalOpeningImageFilter()
+    opening_filter.SetKernelRadius(kernel_radius)
+    opening_filter.SetKernelType(sitk.sitkBall)
+    opening_filter.SetForegroundValue(1)
+    covid_opened = opening_filter.Execute(covid_segmented)
+    
+    # Closing: fills small holes
+    print("  Applying morphological closing...")
+    closing_filter = sitk.BinaryMorphologicalClosingImageFilter()
+    closing_filter.SetKernelRadius(kernel_radius)
+    closing_filter.SetKernelType(sitk.sitkBall)
+    closing_filter.SetForegroundValue(1)
+    covid_closed = closing_filter.Execute(covid_opened)
+    
+    return covid_segmented, covid_opened, covid_closed
+
+def intersect_covid_with_lungs(covid_closed, lung_mask_clean):
+    """Keep only COVID regions within lung fields"""
+    print("Intersecting COVID regions with lung fields...")
+    return sitk.And(covid_closed, lung_mask_clean)
+
+def label_components(covid_in_lungs, min_size):
+    """Perform connected component analysis"""
+    print("Performing connected component analysis...")
+    connected_components = sitk.ConnectedComponent(covid_in_lungs)
+    labeled_image = sitk.RelabelComponent(connected_components, minimumObjectSize=min_size)
+    return labeled_image
+
+def calculate_severity(covid_percentage):
+    """Calculate severity based on percentage of lung affected"""
+    # Based on: https://pmc.ncbi.nlm.nih.gov/articles/PMC7334627/
+    if covid_percentage <= 0:
+        return "None"
+    elif covid_percentage < 5:
+        return "Minimal"
+    elif covid_percentage < 25:
+        return "Mild"
+    elif covid_percentage < 50:
+        return "Moderate"
+    elif covid_percentage < 75:
+        return "Severe"
+    else:
+        return "Critical"
+
+def analyze_overall_statistics(image, filtered_image, lung_mask_clean, covid_in_lungs, labeled_image):
+    """Calculate overall statistics"""
+    print("\n" + "="*60)
+    print("OVERALL STATISTICS")
+    print("="*60)
+    
+    # Get arrays
+    lung_array = sitk.GetArrayFromImage(lung_mask_clean)
+    covid_array = sitk.GetArrayFromImage(covid_in_lungs)
+    
+    # Get spacing for physical measurements
+    spacing = image.GetSpacing()
+    
+    # Calculate volumes
+    total_lung_volume = np.sum(lung_array) * np.prod(spacing) / 1000.0  # mL
+    total_covid_volume = np.sum(covid_array) * np.prod(spacing) / 1000.0  # mL
+    covid_percentage = (total_covid_volume / total_lung_volume * 100) if total_lung_volume > 0 else 0
+    
+    # Get label statistics
+    label_shape_stats = sitk.LabelShapeStatisticsImageFilter()
+    label_shape_stats.Execute(labeled_image)
+    num_regions = label_shape_stats.GetNumberOfLabels()
+    
+    severity = calculate_severity(covid_percentage)
+    
+    # Print statistics
+    print(f"Total lung volume: {total_lung_volume:.2f} mL")
+    print(f"Total COVID volume: {total_covid_volume:.2f} mL")
+    print(f"Percentage of lung affected: {covid_percentage:.2f}%")
+    print(f"Number of detected COVID regions: {num_regions}")
+    print(f"Estimated severity: {severity}")
+    
+    return {
+        "total_lung_volume": total_lung_volume,
+        "total_covid_volume": total_covid_volume,
+        "covid_percentage": covid_percentage,
+        "num_regions": num_regions,
+        "severity": severity,
+        "spacing": spacing
+    }
+
+def analyze_quadrants(lung_mask_clean, covid_in_lungs, spacing):
+    """Perform quadrant analysis"""
+    print("\n" + "="*60)
+    print("QUADRANT ANALYSIS")
+    print("="*60)
+    
+    lung_array = sitk.GetArrayFromImage(lung_mask_clean)
+    covid_array = sitk.GetArrayFromImage(covid_in_lungs)
+    
+    # Get dimensions
+    z_size, y_size, x_size = covid_array.shape
+    z_mid = z_size // 2  # Superior/Inferior division
+    x_mid = x_size // 2  # Left/Right division
+    
+    # Define quadrants
+    quadrants = {
+        'Upper Right': (slice(0, z_mid), slice(None), slice(x_mid, x_size)),
+        'Upper Left': (slice(0, z_mid), slice(None), slice(0, x_mid)),
+        'Lower Right': (slice(z_mid, z_size), slice(None), slice(x_mid, x_size)),
+        'Lower Left': (slice(z_mid, z_size), slice(None), slice(0, x_mid))
+    }
+    
+    quadrant_stats = {}
+    
+    for quad_name, (z_slice, y_slice, x_slice) in quadrants.items():
+        # Extract quadrant data
+        lung_quadrant = lung_array[z_slice, y_slice, x_slice]
+        covid_quadrant = covid_array[z_slice, y_slice, x_slice]
+        
+        # Calculate volumes
+        quad_lung_volume = np.sum(lung_quadrant) * np.prod(spacing) / 1000.0  # mL
+        quad_covid_volume = np.sum(covid_quadrant) * np.prod(spacing) / 1000.0  # mL
+        quad_percentage = (quad_covid_volume / quad_lung_volume * 100) if quad_lung_volume > 0 else 0
+        
+        # Store stats
+        quadrant_stats[quad_name] = {
+            'lung_volume': quad_lung_volume,
+            'covid_volume': quad_covid_volume,
+            'percentage': quad_percentage
+        }
+        
+        # Print quadrant statistics
+        print(f"\n{quad_name} Quadrant:")
+        print(f"  Lung volume: {quad_lung_volume:.2f} mL")
+        print(f"  COVID volume: {quad_covid_volume:.2f} mL")
+        print(f"  Affected: {quad_percentage:.2f}%")
+    
+    # Print summary comparison
+    print(f"\nQUADRANT COMPARISON SUMMARY:")
+    sorted_quads = sorted(quadrant_stats.items(), key=lambda x: x[1]['percentage'], reverse=True)
+    print("\nMost to Least Affected:")
+    for i, (quad_name, stats) in enumerate(sorted_quads, 1):
+        print(f"{i}. {quad_name}: {stats['percentage']:.2f}% affected")
+    
+    return quadrant_stats
+
+def create_visualization(image, filtered_image, lung_mask_clean, covid_segmented, 
+                        covid_opened, covid_closed, covid_in_lungs, labeled_image, 
+                        overall_stats, patient_id, output_dir):
+    """Create comprehensive visualization"""
+    print("\nCreating visualization...")
+    
+    # Get arrays
+    image_array = sitk.GetArrayFromImage(image)
+    filtered_array = sitk.GetArrayFromImage(filtered_image)
+    lung_array = sitk.GetArrayFromImage(lung_mask_clean)
+    covid_array = sitk.GetArrayFromImage(covid_segmented)
+    covid_opened_array = sitk.GetArrayFromImage(covid_opened)
+    covid_closed_array = sitk.GetArrayFromImage(covid_closed)
+    covid_in_lungs_array = sitk.GetArrayFromImage(covid_in_lungs)
+    labeled_array = sitk.GetArrayFromImage(labeled_image)
+    
+    middle_slice = image.GetSize()[2] // 2
+    
+    fig, axes = plt.subplots(3, 4, figsize=(24, 15))
+    fig.suptitle(f'COVID-19 CT Segmentation Analysis - Patient {patient_id}', fontsize=16, fontweight='bold')
+    
+    # Row 1: Original processing steps
+    axes[0, 0].imshow(image_array[middle_slice, :, :], cmap='gray')
+    axes[0, 0].set_title('Original CT Scan')
+    axes[0, 0].axis('off')
+    
+    axes[0, 1].imshow(filtered_array[middle_slice, :, :], cmap='gray')
+    axes[0, 1].set_title('After Anisotropic Filter')
+    axes[0, 1].axis('off')
+    
+    axes[0, 2].imshow(lung_array[middle_slice, :, :], cmap='gray')
+    axes[0, 2].set_title(f'Lung Segmentation\n({PARAMS["lung_segmentation"]["lower_threshold"]} to {PARAMS["lung_segmentation"]["upper_threshold"]} HU)')
+    axes[0, 2].axis('off')
+    
+    axes[0, 3].imshow(covid_array[middle_slice, :, :], cmap='gray')
+    axes[0, 3].set_title(f'COVID Threshold\n({PARAMS["covid_segmentation"]["lower_threshold"]} to {PARAMS["covid_segmentation"]["upper_threshold"]} HU)')
+    axes[0, 3].axis('off')
+    
+    # Row 2: Morphological operations
+    axes[1, 0].imshow(covid_opened_array[middle_slice, :, :], cmap='gray')
+    axes[1, 0].set_title('After Opening')
+    axes[1, 0].axis('off')
+    
+    axes[1, 1].imshow(covid_closed_array[middle_slice, :, :], cmap='gray')
+    axes[1, 1].set_title('After Closing')
+    axes[1, 1].axis('off')
+    
+    axes[1, 2].imshow(covid_in_lungs_array[middle_slice, :, :], cmap='gray')
+    axes[1, 2].set_title('COVID in Lungs Only')
+    axes[1, 2].axis('off')
+    
+    axes[1, 3].imshow(labeled_array[middle_slice, :, :], cmap='nipy_spectral')
+    axes[1, 3].set_title(f'Connected Components\n({overall_stats["num_regions"]} regions)')
+    axes[1, 3].axis('off')
+    
+    # Row 3: Overlay visualizations
+    axes[2, 0].imshow(image_array[middle_slice, :, :], cmap='gray')
+    axes[2, 0].imshow(covid_in_lungs_array[middle_slice, :, :], cmap='Reds', alpha=0.4)
+    axes[2, 0].set_title('COVID Overlay on Original CT')
+    axes[2, 0].axis('off')
+    
+    axes[2, 1].imshow(covid_in_lungs_array[middle_slice, :, :], cmap='gray')
+    axes[2, 1].imshow(image_array[middle_slice, :, :], cmap='viridis', alpha=0.3)
+    axes[2, 1].set_title('Original CT on Binary Mask')
+    axes[2, 1].axis('off')
+    
+    axes[2, 2].imshow(image_array[middle_slice, :, :], cmap='gray')
+    labeled_masked = np.ma.masked_where(labeled_array[middle_slice, :, :] == 0, 
+                                         labeled_array[middle_slice, :, :])
+    axes[2, 2].imshow(labeled_masked, cmap='nipy_spectral', alpha=0.5)
+    axes[2, 2].set_title(f'Labeled Regions on CT\n({overall_stats["num_regions"]} regions)')
+    axes[2, 2].axis('off')
+    
+    # Quadrant overlay
+    axes[2, 3].imshow(image_array[middle_slice, :, :], cmap='gray')
+    axes[2, 3].imshow(covid_in_lungs_array[middle_slice, :, :], cmap='Reds', alpha=0.4)
+    y_max, x_max = image_array[middle_slice, :, :].shape
+    axes[2, 3].axvline(x=x_max // 2, color='cyan', linewidth=2, linestyle='--')
+    axes[2, 3].axhline(y=y_max // 2, color='cyan', linewidth=2, linestyle='--')
+    axes[2, 3].set_title('Quadrant Division Overlay\nwith COVID Segmentation')
+    axes[2, 3].axis('off')
+    
+    plt.tight_layout()
+    
+    # Save figure
+    output_path = os.path.join(output_dir, f"{patient_id}_segmentation.png")
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    print(f"Visualization saved to: {output_path}")
+    
+    plt.show()
+
+def save_results_json(patient_id, overall_stats, quadrant_stats, output_dir):
+    """Save analysis results to JSON file"""
+    results = {
+        "patient_id": patient_id,
+        "timestamp": datetime.now().isoformat(),
+        "overall_statistics": overall_stats,
+        "quadrant_analysis": quadrant_stats,
+        "parameters": PARAMS
+    }
+    
+    output_path = os.path.join(output_dir, f"{patient_id}_results.json")
+    with open(output_path, 'w') as f:
+        json.dump(results, f, indent=4)
+    
+    print(f"Results saved to: {output_path}")
+
+def process_patient(patient_id, dicom_path, output_dir):
+    """Process a single patient"""
+    print("\n" + "="*60)
+    print(f"PROCESSING PATIENT: {patient_id}")
+    print("="*60)
+    
+    try:
+        # Load DICOM
+        image = load_dicom_series(dicom_path)
+        
+        # B1 Algorithm: Anisotropic Diffusion Filter
+        filtered_image = apply_anisotropic_diffusion(image, PARAMS["anisotropic_diffusion"])
+        
+        # Segment lungs
+        lung_mask_clean = segment_lungs(filtered_image, PARAMS["lung_segmentation"])
+        
+        # Segment COVID regions
+        covid_segmented, covid_opened, covid_closed = segment_covid(filtered_image, PARAMS["covid_segmentation"])
+        
+        # Intersect with lungs
+        covid_in_lungs = intersect_covid_with_lungs(covid_closed, lung_mask_clean)
+        
+        # Connected component analysis
+        labeled_image = label_components(covid_in_lungs, PARAMS["morphology"]["min_component_size"])
+        
+        # Analyze statistics
+        overall_stats = analyze_overall_statistics(image, filtered_image, lung_mask_clean, 
+                                                   covid_in_lungs, labeled_image)
+        
+        # Quadrant analysis
+        quadrant_stats = analyze_quadrants(lung_mask_clean, covid_in_lungs, image.GetSpacing())
+        
+        # Create visualization
+        create_visualization(image, filtered_image, lung_mask_clean, covid_segmented,
+                           covid_opened, covid_closed, covid_in_lungs, labeled_image,
+                           overall_stats, patient_id, output_dir)
+        
+        # Save results
+        save_results_json(patient_id, overall_stats, quadrant_stats, output_dir)
+        
+        print(f"\n✓ Successfully processed patient {patient_id}")
+        return True
+        
+    except Exception as e:
+        print(f"\n✗ Error processing patient {patient_id}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def main():
+    # Create output directory
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    print(f"Output directory: {OUTPUT_DIR}")
+    
+    # Process each patient
+    results = {}
+    for patient_id, relative_path in PATIENTS.items():
+        if relative_path is None:
+            print(f"\nSkipping {patient_id}: Path not specified")
+            continue
+        
+        dicom_path = os.path.join(BASE_DICOM_DIR, relative_path)
+        
+        if not os.path.exists(dicom_path):
+            print(f"\nSkipping {patient_id}: Path does not exist: {dicom_path}")
+            continue
+        
+        success = process_patient(patient_id, dicom_path, OUTPUT_DIR)
+        results[patient_id] = "Success" if success else "Failed"
+    
+    # Print summary
+    print("\n" + "="*60)
+    print("PROCESSING SUMMARY")
+    print("="*60)
+    for patient_id, status in results.items():
+        print(f"{patient_id}: {status}")
+
+if __name__ == "__main__":
+    main()
