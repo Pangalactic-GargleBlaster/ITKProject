@@ -17,12 +17,6 @@ def lungsBorder(image: sitk.Image) -> sitk.Image:
     binary_image = region_growing_filter.Execute(smoothed_image)
     return sitk.Cast(binary_image, sitk.sitkFloat64)
 
-def pixel_to_phisical(index, img):
-    spacing = np.array(img.GetSpacing())
-    direction = np.array(img.GetDirection()).reshape(3,3)
-    origin = np.array(img.GetOrigin())
-    return origin + direction @ (np.array(index) * spacing)
-
 image_viewer = sitk.ImageViewer()
 image_viewer.SetApplication(base_file_path + '\\AppData\\Local\\Fiji\\fiji-windows-x64.exe')
 reader = sitk.ImageSeriesReader()
