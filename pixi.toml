@@ -6,3 +6,4 @@ platforms = ["win-64"]
 
 [dependencies]
 SimpleITK = "*"
+numpy = "*"

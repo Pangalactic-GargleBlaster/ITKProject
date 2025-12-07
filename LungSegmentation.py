@@ -3,7 +3,7 @@ import SimpleITK as sitk
 # read image
 image_viewer = sitk.ImageViewer()
 image_viewer.SetApplication('C:\\Users\\paolo\\AppData\\Local\\Fiji\\fiji-windows-x64.exe')
-dicom_directory = "C:/Users/paolo/Desktop/821/CovidScans/manifest-1608266677008/MIDRC-RICORD-1A/MIDRC-RICORD-1A-419639-000082/08-02-2002-NA-CT CHEST WITHOUT CONTRAST-04614/3.000000-0.625mm bone alg-26970/"
+dicom_directory = "C:/Users/paolo/Desktop/821/CovidScans/manifest-1608266677008/MIDRC-RICORD-1A/MIDRC-RICORD-1A-419639-000906/10-23-2002-NA-CT CHEST WITHOUT CONTRAST-40186/3.000000-0.625mm bone alg-94216"
 series_IDs = sitk.ImageSeriesReader.GetGDCMSeriesIDs(dicom_directory)
 reader = sitk.ImageSeriesReader()
 reader.SetFileNames(sitk.ImageSeriesReader.GetGDCMSeriesFileNames(dicom_directory, series_IDs[0]))
@@ -27,7 +27,7 @@ print("smoothed the image")
 region_growing_filter = sitk.ConnectedThresholdImageFilter()
 region_growing_filter.SetSeedList([(128, 256, 256),(384, 256, 256)])
 region_growing_filter.SetLower(-1000)
-region_growing_filter.SetUpper(-200)
+region_growing_filter.SetUpper(-220)
 binary_image = region_growing_filter.Execute(smoothed_image)
 erosion_filter = sitk.BinaryErodeImageFilter()
 erosion_filter.SetKernelRadius(2)
