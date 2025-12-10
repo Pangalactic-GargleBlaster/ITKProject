@@ -8,12 +8,11 @@ from datetime import datetime
 
 print(f"SimpleITK Version: {sitk.Version()}")
 
-
 BASE_DICOM_DIR = "C:/Users/jagal/Biomedical Scans/manifest-1608266677008/MIDRC-RICORD-1A"
 
 # Patient directories to process
 PATIENTS = {
-    "Patient-0": "MIDRC-RICORD-1A-419639-000082/08-02-2002-NA-CT CHEST WITHOUT CONTRAST-04614/3.000000-0.625mm bone alg-26970", #Base Case
+    "Patient-0": "MIDRC-RICORD-1A-419639-000082/08-02-2002-NA-CT CHEST WITHOUT CONTRAST-04614/3.000000-0.625mm bone alg-26970", #Base Case (REFERENCE)
     "Patient-1": "MIDRC-RICORD-1A-419639-000361/10-21-2002-NA-CT CHEST WITHOUT CONTRAST-91670/3.000000-0.625mm bone alg-30767", #Maybe Case
     "Patient-2": "MIDRC-RICORD-1A-419639-000800/05-11-2005-NA-CT CHEST WITHOUT CONTRAST-61055/3.000000-0.625mm bone alg-10315", #No Case
     "Patient-3": "MIDRC-RICORD-1A-419639-000906/10-23-2002-NA-CT CHEST WITHOUT CONTRAST-40186/3.000000-0.625mm bone alg-94216", #Maybe Case
@@ -21,6 +20,9 @@ PATIENTS = {
     "Patient-5": "MIDRC-RICORD-1A-419639-001085/09-13-2002-NA-CT CHEST WITHOUT CONTRAST-85381/3.000000-0.625mm bone alg-67629", #Good Case
     "Patient-6": "MIDRC-RICORD-1A-419639-001446/09-16-2006-NA-CT CHEST WITHOUT CONTRAST-60317/3.000000-0.625mm bone alg-20968", #Good Case
 }
+
+# Reference patient for registration
+REFERENCE_PATIENT = "Patient-0"
 
 # Output directory for results
 OUTPUT_DIR = "C:/Users/jagal/Biomedical Scans/segmentation_results"
@@ -44,6 +46,16 @@ PARAMS = {
         "kernel_radius": 2,
         "lung_opening_radius": 3,
         "min_component_size": 100
+    },
+    "registration": {
+        "smoothing_sigma": 5,
+        "region_growing_lower": -1000,
+        "region_growing_upper": -220,
+        "seed_list": [(128, 256, 256), (384, 256, 256)],
+        "metric_sampling_percentage": 0.02,
+        "simplex_delta": 0.01,
+        "num_iterations": 200,
+        "optimizer_scales": [10, 10, 10, 0.01, 0.01, 0.01, 10]
     }
 }
 
@@ -60,6 +72,9 @@ def load_dicom_series(dicom_directory):
     reader.SetFileNames(sitk.ImageSeriesReader.GetGDCMSeriesFileNames(dicom_directory, series_IDs[0]))
     image = reader.Execute()
     
+    # Set origin to [0,0,0] for registration
+    image.SetOrigin([0, 0, 0])
+    
     # Cast to float for processing
     image = sitk.Cast(image, sitk.sitkFloat64)
     
@@ -67,6 +82,72 @@ def load_dicom_series(dicom_directory):
     print(f"Image spacing: {image.GetSpacing()} mm")
     
     return image
+
+def extract_lung_border(image, params):
+    """Extract lung border for registration using region growing"""
+    print("Extracting lung border for registration...")
+    
+    # Smoothing
+    smoothing_filter = sitk.SmoothingRecursiveGaussianImageFilter()
+    smoothing_filter.SetSigma(params["smoothing_sigma"])
+    smoothed_image = smoothing_filter.Execute(image)
+    
+    # Region growing
+    region_growing_filter = sitk.ConnectedThresholdImageFilter()
+    region_growing_filter.SetSeedList(params["seed_list"])
+    region_growing_filter.SetLower(params["region_growing_lower"])
+    region_growing_filter.SetUpper(params["region_growing_upper"])
+    binary_image = region_growing_filter.Execute(smoothed_image)
+    
+    return sitk.Cast(binary_image, sitk.sitkFloat64)
+
+def register_to_reference(image, lungs_border, reference_image, reference_lungs_border, params):
+    """Register image to reference using lung borders"""
+    print("Registering image to reference...")
+    
+    # Setup registration
+    registration = sitk.ImageRegistrationMethod()
+    registration.SetMetricAsMeanSquares()
+    registration.SetMetricSamplingStrategy(registration.RANDOM)
+    registration.SetMetricSamplingPercentage(params["metric_sampling_percentage"])
+    registration.SetOptimizerAsAmoeba(
+        simplexDelta=params["simplex_delta"],
+        numberOfIterations=params["num_iterations"]
+    )
+    registration.SetInterpolator(sitk.sitkLinear)
+    
+    # Set initial transform
+    registration.SetInitialTransform(sitk.Similarity3DTransform())
+    registration.SetOptimizerScales(params["optimizer_scales"])
+    
+    # Add callback to monitor progress
+    iteration_count = [0]
+    def iteration_callback():
+        iteration_count[0] += 1
+        if iteration_count[0] % 20 == 0:  # Print every 20 iterations
+            print(f"  Iteration {registration.GetOptimizerIteration()}: "
+                  f"Metric = {registration.GetMetricValue():.4f}")
+    
+    registration.AddCommand(sitk.sitkIterationEvent, iteration_callback)
+    
+    # Execute registration
+    print("  Starting registration optimization...")
+    transform = registration.Execute(reference_lungs_border, lungs_border)
+    
+    final_metric = registration.GetMetricValue()
+    print(f"  Registration complete. Final metric: {final_metric:.4f}")
+    print(f"  Transform: {transform}")
+    
+    # Resample image to reference space
+    print("  Resampling image to reference space...")
+    resampler = sitk.ResampleImageFilter()
+    resampler.SetReferenceImage(reference_image)
+    resampler.SetInterpolator(sitk.sitkLinear)
+    resampler.SetDefaultPixelValue(-3024.0)
+    resampler.SetTransform(transform)
+    registered_image = resampler.Execute(image)
+    
+    return registered_image, transform, final_metric
 
 def apply_anisotropic_diffusion(image, params):
     """Apply anisotropic diffusion filter"""
@@ -199,47 +280,47 @@ def analyze_overall_statistics(image, filtered_image, lung_mask_clean, covid_in_
     }
 
 def analyze_quadrants(lung_mask_clean, covid_in_lungs, spacing):
-    """Perform quadrant analysis"""
+    """Analyze COVID distribution across lung quadrants"""
     print("\n" + "="*60)
     print("QUADRANT ANALYSIS")
     print("="*60)
     
+    # Get arrays
     lung_array = sitk.GetArrayFromImage(lung_mask_clean)
     covid_array = sitk.GetArrayFromImage(covid_in_lungs)
     
     # Get dimensions
-    z_size, y_size, x_size = covid_array.shape
-    z_mid = z_size // 2  # Superior/Inferior division
-    x_mid = x_size // 2  # Left/Right division
+    z_size, y_size, x_size = lung_array.shape
     
-    # Define quadrants
+    # Split into quadrants (left/right, upper/lower)
+    x_mid = x_size // 2
+    y_mid = y_size // 2
+    
     quadrants = {
-        'Upper Right': (slice(0, z_mid), slice(None), slice(x_mid, x_size)),
-        'Upper Left': (slice(0, z_mid), slice(None), slice(0, x_mid)),
-        'Lower Right': (slice(z_mid, z_size), slice(None), slice(x_mid, x_size)),
-        'Lower Left': (slice(z_mid, z_size), slice(None), slice(0, x_mid))
+        "Upper-Left": (slice(None), slice(0, y_mid), slice(0, x_mid)),
+        "Upper-Right": (slice(None), slice(0, y_mid), slice(x_mid, None)),
+        "Lower-Left": (slice(None), slice(y_mid, None), slice(0, x_mid)),
+        "Lower-Right": (slice(None), slice(y_mid, None), slice(x_mid, None))
     }
     
     quadrant_stats = {}
     
     for quad_name, (z_slice, y_slice, x_slice) in quadrants.items():
-        # Extract quadrant data
-        lung_quadrant = lung_array[z_slice, y_slice, x_slice]
-        covid_quadrant = covid_array[z_slice, y_slice, x_slice]
+        # Extract quadrant regions
+        lung_quad = lung_array[z_slice, y_slice, x_slice]
+        covid_quad = covid_array[z_slice, y_slice, x_slice]
         
         # Calculate volumes
-        quad_lung_volume = np.sum(lung_quadrant) * np.prod(spacing) / 1000.0  # mL
-        quad_covid_volume = np.sum(covid_quadrant) * np.prod(spacing) / 1000.0  # mL
+        quad_lung_volume = np.sum(lung_quad) * np.prod(spacing) / 1000.0
+        quad_covid_volume = np.sum(covid_quad) * np.prod(spacing) / 1000.0
         quad_percentage = (quad_covid_volume / quad_lung_volume * 100) if quad_lung_volume > 0 else 0
         
-        # Store stats
         quadrant_stats[quad_name] = {
-            'lung_volume': quad_lung_volume,
-            'covid_volume': quad_covid_volume,
-            'percentage': quad_percentage
+            "lung_volume": quad_lung_volume,
+            "covid_volume": quad_covid_volume,
+            "percentage": quad_percentage
         }
         
-        # Print quadrant statistics
         print(f"\n{quad_name} Quadrant:")
         print(f"  Lung volume: {quad_lung_volume:.2f} mL")
         print(f"  COVID volume: {quad_covid_volume:.2f} mL")
@@ -256,7 +337,7 @@ def analyze_quadrants(lung_mask_clean, covid_in_lungs, spacing):
 
 def create_visualization(image, filtered_image, lung_mask_clean, covid_segmented, 
                         covid_opened, covid_closed, covid_in_lungs, labeled_image, 
-                        overall_stats, patient_id, output_dir):
+                        overall_stats, patient_id, output_dir, is_registered=False):
     """Create comprehensive visualization"""
     print("\nCreating visualization...")
     
@@ -273,7 +354,10 @@ def create_visualization(image, filtered_image, lung_mask_clean, covid_segmented
     middle_slice = image.GetSize()[2] // 2
     
     fig, axes = plt.subplots(3, 4, figsize=(24, 15))
-    fig.suptitle(f'COVID-19 CT Segmentation Analysis - Patient {patient_id}', fontsize=16, fontweight='bold')
+    
+    title_suffix = " (After Registration)" if is_registered else ""
+    fig.suptitle(f'COVID-19 CT Segmentation Analysis - Patient {patient_id}{title_suffix}', 
+                 fontsize=16, fontweight='bold')
     
     # Row 1: Original processing steps
     axes[0, 0].imshow(image_array[middle_slice, :, :], cmap='gray')
@@ -345,7 +429,7 @@ def create_visualization(image, filtered_image, lung_mask_clean, covid_segmented
     
     plt.show()
 
-def save_results_json(patient_id, overall_stats, quadrant_stats, output_dir):
+def save_results_json(patient_id, overall_stats, quadrant_stats, output_dir, registration_info=None):
     """Save analysis results to JSON file"""
     results = {
         "patient_id": patient_id,
@@ -355,14 +439,29 @@ def save_results_json(patient_id, overall_stats, quadrant_stats, output_dir):
         "parameters": PARAMS
     }
     
+    if registration_info:
+        results["registration"] = registration_info
+    
     output_path = os.path.join(output_dir, f"{patient_id}_results.json")
     with open(output_path, 'w') as f:
         json.dump(results, f, indent=4)
     
     print(f"Results saved to: {output_path}")
 
-def process_patient(patient_id, dicom_path, output_dir):
-    """Process a single patient"""
+def process_patient(patient_id, dicom_path, output_dir, reference_image=None, reference_lungs_border=None):
+    """
+    Process a single patient with registration, segmentation, and quantification
+    
+    Args:
+        patient_id: Patient identifier
+        dicom_path: Path to patient DICOM directory
+        output_dir: Output directory for results
+        reference_image: Reference image for registration (None if this IS the reference)
+        reference_lungs_border: Reference lung border for registration (None if this IS the reference)
+    
+    Returns:
+        Tuple of (overall_stats, quadrant_stats, image, lungs_border) for potential use as reference
+    """
     print("\n" + "="*60)
     print(f"PROCESSING PATIENT: {patient_id}")
     print("="*60)
@@ -370,6 +469,45 @@ def process_patient(patient_id, dicom_path, output_dir):
     try:
         # Load DICOM
         image = load_dicom_series(dicom_path)
+        
+        # Extract lung border for registration
+        lungs_border = extract_lung_border(image, PARAMS["registration"])
+        
+        registration_info = None
+        is_registered = False
+        
+        # If this is NOT the reference patient, perform registration
+        if reference_image is not None and reference_lungs_border is not None:
+            print(f"\n{'='*60}")
+            print("STEP 1: REGISTRATION")
+            print(f"{'='*60}")
+            
+            registered_image, transform, final_metric = register_to_reference(
+                image, lungs_border, reference_image, reference_lungs_border, PARAMS["registration"]
+            )
+            
+            registration_info = {
+                "is_reference": False,
+                "transform": str(transform),
+                "final_metric": float(final_metric)
+            }
+            
+            # Use registered image for segmentation
+            image = registered_image
+            is_registered = True
+            print(f"✓ Registration complete")
+        else:
+            print(f"\n{'='*60}")
+            print("REFERENCE PATIENT - Skipping Registration")
+            print(f"{'='*60}")
+            registration_info = {
+                "is_reference": True
+            }
+        
+        # STEP 2: SEGMENTATION
+        print(f"\n{'='*60}")
+        print("STEP 2: SEGMENTATION")
+        print(f"{'='*60}")
         
         # B1 Algorithm: Anisotropic Diffusion Filter
         filtered_image = apply_anisotropic_diffusion(image, PARAMS["anisotropic_diffusion"])
@@ -386,6 +524,13 @@ def process_patient(patient_id, dicom_path, output_dir):
         # Connected component analysis
         labeled_image = label_components(covid_in_lungs, PARAMS["morphology"]["min_component_size"])
         
+        print(f"✓ Segmentation complete")
+        
+        # STEP 3: QUANTIFICATION
+        print(f"\n{'='*60}")
+        print("STEP 3: QUANTIFICATION")
+        print(f"{'='*60}")
+        
         # Analyze statistics
         overall_stats = analyze_overall_statistics(image, filtered_image, lung_mask_clean, 
                                                    covid_in_lungs, labeled_image)
@@ -393,31 +538,236 @@ def process_patient(patient_id, dicom_path, output_dir):
         # Quadrant analysis
         quadrant_stats = analyze_quadrants(lung_mask_clean, covid_in_lungs, image.GetSpacing())
         
+        print(f"✓ Quantification complete")
+        
         # Create visualization
         create_visualization(image, filtered_image, lung_mask_clean, covid_segmented,
                            covid_opened, covid_closed, covid_in_lungs, labeled_image,
-                           overall_stats, patient_id, output_dir)
+                           overall_stats, patient_id, output_dir, is_registered)
         
         # Save results
-        save_results_json(patient_id, overall_stats, quadrant_stats, output_dir)
+        save_results_json(patient_id, overall_stats, quadrant_stats, output_dir, registration_info)
         
         print(f"\n✓ Successfully processed patient {patient_id}")
-        return True
+        
+        # Return image and lung border for potential use as reference
+        return overall_stats, quadrant_stats, image, lungs_border
         
     except Exception as e:
         print(f"\n✗ Error processing patient {patient_id}: {str(e)}")
         import traceback
         traceback.print_exc()
-        return False
+        return None, None, None, None
+
+def create_quantification_plots(all_results, output_dir):
+    """Create boxplot and histogram for quantification across all patients"""
+    print("\n" + "="*60)
+    print("CREATING QUANTIFICATION VISUALIZATIONS")
+    print("="*60)
+    
+    # Prepare data for quadrant boxplot
+    quadrant_data = {
+        "Upper-Left": [],
+        "Upper-Right": [],
+        "Lower-Left": [],
+        "Lower-Right": []
+    }
+    
+    # Prepare data for overall COVID percentage histogram
+    covid_percentages = []
+    patient_labels = []
+    
+    for patient_id, (overall_stats, quadrant_stats) in all_results.items():
+        if overall_stats is None or quadrant_stats is None:
+            continue
+        
+        # Collect quadrant percentages
+        for quad_name, quad_data in quadrant_stats.items():
+            quadrant_data[quad_name].append(quad_data['percentage'])
+        
+        # Collect overall COVID percentage
+        covid_percentages.append(overall_stats['covid_percentage'])
+        patient_labels.append(patient_id)
+    
+    # Create figure with 2 subplots
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    fig.suptitle('COVID-19 Lung Distribution Quantification Analysis (After Registration)', 
+                 fontsize=16, fontweight='bold')
+    
+    # ===== BOXPLOT: Quadrant Distribution =====
+    ax1 = axes[0]
+    
+    # Prepare data for boxplot
+    box_data = [quadrant_data[quad] for quad in ["Upper-Left", "Upper-Right", "Lower-Left", "Lower-Right"]]
+    box_labels = ["Upper-Left", "Upper-Right", "Lower-Left", "Lower-Right"]
+    
+    # Create boxplot
+    bp = ax1.boxplot(box_data, labels=box_labels, patch_artist=True, 
+                     notch=True, showmeans=True,
+                     boxprops=dict(facecolor='lightblue', alpha=0.7),
+                     medianprops=dict(color='red', linewidth=2),
+                     meanprops=dict(marker='D', markerfacecolor='green', markersize=8),
+                     whiskerprops=dict(linewidth=1.5),
+                     capprops=dict(linewidth=1.5))
+    
+    # Add individual data points
+    for i, (quad_name, data) in enumerate(quadrant_data.items(), 1):
+        y = data
+        x = np.random.normal(i, 0.04, size=len(y))  # Add jitter
+        ax1.scatter(x, y, alpha=0.6, s=50, c='navy', edgecolors='black', linewidth=0.5)
+    
+    ax1.set_ylabel('COVID Affected Percentage (%)', fontsize=12, fontweight='bold')
+    ax1.set_xlabel('Lung Quadrant', fontsize=12, fontweight='bold')
+    ax1.set_title('COVID Distribution by Quadrant Across All Patients', fontsize=13, fontweight='bold')
+    ax1.grid(True, alpha=0.3, linestyle='--')
+    ax1.set_ylim(bottom=0)
+    
+    # Add legend
+    ax1.legend([bp["medians"][0], bp["means"][0]], 
+               ['Median', 'Mean'], 
+               loc='upper right')
+    
+    # ===== HISTOGRAM: Overall COVID Percentage =====
+    ax2 = axes[1]
+    
+    # Create histogram
+    n, bins, patches = ax2.hist(covid_percentages, bins=10, 
+                                 color='skyblue', edgecolor='black', 
+                                 alpha=0.7, linewidth=1.5)
+    
+    # Color bars by severity
+    for i, patch in enumerate(patches):
+        bin_center = (bins[i] + bins[i+1]) / 2
+        severity = calculate_severity(bin_center)
+        if severity == "None" or severity == "Minimal":
+            patch.set_facecolor('lightgreen')
+        elif severity == "Mild":
+            patch.set_facecolor('yellow')
+        elif severity == "Moderate":
+            patch.set_facecolor('orange')
+        elif severity == "Severe":
+            patch.set_facecolor('orangered')
+        else:  # Critical
+            patch.set_facecolor('darkred')
+    
+    # Add patient labels on top of bars
+    for i, (patient_id, pct) in enumerate(zip(patient_labels, covid_percentages)):
+        ax2.annotate(patient_id, 
+                     xy=(pct, 0.5), 
+                     xytext=(0, 10),
+                     textcoords='offset points',
+                     ha='center',
+                     fontsize=9,
+                     fontweight='bold',
+                     rotation=45)
+    
+    ax2.set_xlabel('COVID Affected Percentage (%)', fontsize=12, fontweight='bold')
+    ax2.set_ylabel('Number of Patients', fontsize=12, fontweight='bold')
+    ax2.set_title('Distribution of Overall COVID Lung Involvement', fontsize=13, fontweight='bold')
+    ax2.grid(True, alpha=0.3, linestyle='--', axis='y')
+    
+    # Add severity zones as vertical bands
+    ax2.axvspan(0, 5, alpha=0.1, color='green', label='Minimal')
+    ax2.axvspan(5, 25, alpha=0.1, color='yellow', label='Mild')
+    ax2.axvspan(25, 50, alpha=0.1, color='orange', label='Moderate')
+    ax2.axvspan(50, 75, alpha=0.1, color='orangered', label='Severe')
+    ax2.axvspan(75, 100, alpha=0.1, color='darkred', label='Critical')
+    
+    ax2.legend(loc='upper right', title='Severity')
+    
+    # Add statistics text
+    mean_covid = np.mean(covid_percentages)
+    median_covid = np.median(covid_percentages)
+    std_covid = np.std(covid_percentages)
+    
+    stats_text = f'Mean: {mean_covid:.2f}%\nMedian: {median_covid:.2f}%\nStd Dev: {std_covid:.2f}%'
+    ax2.text(0.02, 0.98, stats_text, 
+             transform=ax2.transAxes,
+             fontsize=10,
+             verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    plt.tight_layout()
+    
+    # Save figure
+    output_path = os.path.join(output_dir, "quantification_analysis.png")
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"Quantification plots saved to: {output_path}")
+    
+    plt.show()
+    
+    # Print summary statistics
+    print("\n" + "="*60)
+    print("QUANTIFICATION SUMMARY STATISTICS")
+    print("="*60)
+    
+    print("\nQuadrant Statistics (across all patients):")
+    for quad_name, data in quadrant_data.items():
+        if len(data) > 0:
+            print(f"\n{quad_name}:")
+            print(f"  Mean: {np.mean(data):.2f}%")
+            print(f"  Median: {np.median(data):.2f}%")
+            print(f"  Std Dev: {np.std(data):.2f}%")
+            print(f"  Min: {np.min(data):.2f}%")
+            print(f"  Max: {np.max(data):.2f}%")
+    
+    print("\nOverall COVID Percentage Statistics:")
+    print(f"  Mean: {mean_covid:.2f}%")
+    print(f"  Median: {median_covid:.2f}%")
+    print(f"  Std Dev: {std_covid:.2f}%")
+    print(f"  Min: {np.min(covid_percentages):.2f}%")
+    print(f"  Max: {np.max(covid_percentages):.2f}%")
 
 def main():
     # Create output directory
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     print(f"Output directory: {OUTPUT_DIR}")
     
-    # Process each patient
-    results = {}
+    print("\n" + "="*60)
+    print("COVID-19 CT ANALYSIS PIPELINE")
+    print("Workflow: Registration → Segmentation → Quantification")
+    print("="*60)
+    
+    # Store results for quantification analysis
+    all_results = {}
+    
+    # Store reference image and lung border
+    reference_image = None
+    reference_lungs_border = None
+    
+    # Process reference patient first
+    reference_path = PATIENTS[REFERENCE_PATIENT]
+    if reference_path:
+        dicom_path = os.path.join(BASE_DICOM_DIR, reference_path)
+        
+        if os.path.exists(dicom_path):
+            overall_stats, quadrant_stats, ref_img, ref_lungs = process_patient(
+                REFERENCE_PATIENT, dicom_path, OUTPUT_DIR, None, None
+            )
+            
+            if overall_stats is not None:
+                all_results[REFERENCE_PATIENT] = (overall_stats, quadrant_stats)
+                reference_image = ref_img
+                reference_lungs_border = ref_lungs
+                print(f"\n✓ Reference patient {REFERENCE_PATIENT} processed successfully")
+            else:
+                print(f"\n✗ Failed to process reference patient {REFERENCE_PATIENT}")
+                return
+        else:
+            print(f"\n✗ Reference patient path does not exist: {dicom_path}")
+            return
+    else:
+        print(f"\n✗ Reference patient {REFERENCE_PATIENT} has no path specified")
+        return
+    
+    # Process remaining patients with registration
+    processing_summary = {REFERENCE_PATIENT: "Success (Reference)"}
+    
     for patient_id, relative_path in PATIENTS.items():
+        # Skip reference patient (already processed)
+        if patient_id == REFERENCE_PATIENT:
+            continue
+        
         if relative_path is None:
             print(f"\nSkipping {patient_id}: Path not specified")
             continue
@@ -428,14 +778,27 @@ def main():
             print(f"\nSkipping {patient_id}: Path does not exist: {dicom_path}")
             continue
         
-        success = process_patient(patient_id, dicom_path, OUTPUT_DIR)
-        results[patient_id] = "Success" if success else "Failed"
+        overall_stats, quadrant_stats, _, _ = process_patient(
+            patient_id, dicom_path, OUTPUT_DIR, reference_image, reference_lungs_border
+        )
+        
+        if overall_stats is not None and quadrant_stats is not None:
+            all_results[patient_id] = (overall_stats, quadrant_stats)
+            processing_summary[patient_id] = "Success"
+        else:
+            processing_summary[patient_id] = "Failed"
+    
+    # Create quantification plots if we have results
+    if len(all_results) > 1:  # Need at least 2 patients for meaningful comparison
+        create_quantification_plots(all_results, OUTPUT_DIR)
+    else:
+        print("\nInsufficient results to create quantification plots (need at least 2 patients)")
     
     # Print summary
     print("\n" + "="*60)
     print("PROCESSING SUMMARY")
     print("="*60)
-    for patient_id, status in results.items():
+    for patient_id, status in processing_summary.items():
         print(f"{patient_id}: {status}")
 
 if __name__ == "__main__":
