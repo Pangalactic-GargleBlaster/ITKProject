@@ -1,5 +1,6 @@
 import SimpleITK as sitk
 import numpy as np
+from datetime import datetime
 
 base_file_path = 'C:/Users/paolo'
 # lung segmentation utility function
@@ -24,10 +25,13 @@ reader = sitk.ImageSeriesReader()
 reference_dicom_directory = base_file_path + "/Desktop/821/CovidScans/manifest-1608266677008/MIDRC-RICORD-1A/MIDRC-RICORD-1A-419639-000082/08-02-2002-NA-CT CHEST WITHOUT CONTRAST-04614/3.000000-0.625mm bone alg-26970/"
 reference_series_IDs = sitk.ImageSeriesReader.GetGDCMSeriesIDs(reference_dicom_directory)
 reader.SetFileNames(sitk.ImageSeriesReader.GetGDCMSeriesFileNames(reference_dicom_directory, reference_series_IDs[0]))
+starting_time = datetime.now()
 reference_image = reader.Execute()
 reference_image.SetOrigin([0,0,0])
 reference_image = sitk.Cast(reference_image, sitk.sitkFloat64)
+finished_loading_time = datetime.now()
 reference_lungs = lungsBorder(reference_image)
+segmented_lungs_time = datetime.now()
 print("reference lung field ready")
 # image_viewer.Execute(reference_lungs_border)
 
@@ -55,8 +59,8 @@ registration.AddCommand(
 
 with open(metadata_path, "r") as metadata_file:
 	lines = metadata_file.readlines()
-	for line in lines:
-	# for line in [lines[47]]:
+	# for line in lines:
+	for line in [lines[47]]:
 		if line.split(",")[8] == "0.625mm bone alg" and line.split(",")[6] == "CT CHEST WITHOUT CONTRAST":
 			local_path = line.split(",")[15]
 			dicom_directory = base_file_path + "/Desktop/821/CovidScans/manifest-1608266677008/"+local_path[1:]
@@ -72,12 +76,14 @@ with open(metadata_path, "r") as metadata_file:
 			registration.SetInitialTransform(sitk.Similarity3DTransform())
 			# registration.SetOptimizerScalesFromPhysicalShift()
 			registration.SetOptimizerScales([10, 10, 10, 0.01, 0.01, 0.01, 10])
-			transform = registration.Execute(reference_lungs_border, lungs_border)
+			registration_starting_time = datetime.now()
+			transform = registration.Execute(reference_lungs, lungs_only_image)
+			registration_finished_time = datetime.now()
 			# transform = sitk.Similarity3DTransform()
 			# transform.SetScale(0.9)
 			# transform.SetRotation([0, 0, -0.1305, 0.9914])  # rotation around z-axis
 			# transform.SetTranslation((50,0,20))
-			print(f"metric after transform: {registration.MetricEvaluate(reference_lungs_border, lungs_border)}")
+			print(f"metric after transform: {registration.MetricEvaluate(reference_lungs, lungs_only_image)}")
 			
 			print(f"the transform for this image is {transform}")
 			resampler = sitk.ResampleImageFilter()
@@ -87,6 +93,14 @@ with open(metadata_path, "r") as metadata_file:
 			# resampler.SetDefaultPixelValue(0)
 			resampler.SetTransform(transform)
 			registeredImage = resampler.Execute(image)
+			resampling_finished_time = datetime.now()
+			print(
+				'TIMING STATS:\n' +
+				f'Loading time: {finished_loading_time - starting_time}\n' +
+				f'segmentation time: {segmented_lungs_time - finished_loading_time}\n' +
+				f'registration time: {registration_finished_time - registration_starting_time}\n' +
+				f'resampling_time: {resampling_finished_time - registration_finished_time}'
+			)
 			# registered_lungs = resampler.Execute(lungs_border)
 			# image_viewer.Execute(registeredImage)
 			# image_viewer.Execute(registered_lungs)
